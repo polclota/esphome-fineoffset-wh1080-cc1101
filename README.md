@@ -1,160 +1,172 @@
-# ESPHome Fine Offset WH1080/WH3080 CC1101 Receiver
+# ESPHome Fine Offset WH1080 / WH3080 CC1101 Receiver
 
-ESPHome custom component for receiving **Fine Offset WH1080 / WH3080 compatible weather station sensors** using an **ESP32 and a CC1101 433 MHz transceiver**.
+Receive **Fine Offset WH1080 / WH3080 compatible 433 MHz weather stations directly in ESPHome** using an ESP32 and a CC1101 transceiver.
 
-The decoder receives the original OOK weather station transmissions directly and exposes the decoded measurements to ESPHome / Home Assistant.
+This project was created after finding that a straightforward decoder could occasionally receive a valid packet, but most transmissions failed CRC. The RF signal was actually fine: the important missing detail was support for the **87-bit frame variant with a 7-bit preamble** used by these stations.
 
-A key feature of this implementation is proper support for the **87-bit Fine Offset frame variant with a 7-bit preamble**, following the framing behavior documented and implemented by `rtl_433`.
+The framing and protocol handling are based on the reverse-engineering work in [`rtl_433`](https://github.com/merbanan/rtl_433), especially its Fine Offset WH1080/WH3080 decoder.
 
-## Features
+## What it provides
 
-* ESP32 + CC1101 receiver
-* 433.92 MHz OOK/ASK reception
-* Fine Offset WH1080 / WH3080 weather protocol
-* 87-bit frames with 7-bit preamble
-* 88-bit frame support
-* CRC-8 validation
-* Weather station ID
-* Temperature
-* Relative humidity
-* Wind speed
-* Wind gust
-* Wind direction
-* Cumulative rainfall
-* Support for Fine Offset UV/light frame decoding
-* ESPHome native sensors
-* Home Assistant integration through ESPHome
-* Diagnostic logging for RF and protocol debugging
+- ESP32 + CC1101 433 MHz receiver
+- Fine Offset WH1080 / WH3080 weather decoding
+- 87-bit frames with 7-bit preamble
+- 88-bit frame support
+- CRC-8 validation
+- Temperature and humidity
+- Wind speed and gust
+- Wind direction
+- Cumulative rainfall
+- Station ID
+- UV / light frame decoding support
+- Native ESPHome sensors for Home Assistant
+- RF/protocol diagnostic logging
 
-## Why This Project Exists
+## Hardware
 
-Fine Offset WH1080/WH3080 weather stations use a simple 433 MHz OOK protocol that is already well understood and supported by `rtl_433`.
+Tested with:
 
-However, while developing a direct ESPHome receiver using a CC1101, frames appeared to be received correctly at the RF level but most of them failed CRC validation.
+- ESP32
+- CC1101 433 MHz module
+- External 433 MHz antenna / pigtail
+- ESPHome
 
-Occasionally, a perfectly valid packet would be received:
+### Working setup
+
+![Working ESP32 and CC1101 setup](working%20set.jpg)
+
+### CC1101 module used for testing
+
+Front:
+
+![CC1101 front](CC1101%20front.jpg)
+
+Back:
+
+![CC1101 back](CC1101%20back.jpg)
+
+> **Important:** CC1101 modules that look similar do not always have the same physical pin arrangement. Check the labels on your specific board before connecting it. This was particularly relevant during development of this project.
+
+The module is powered from **3.3 V**.
+
+## Wiring used during development
+
+| CC1101 | ESP32 |
+| --- | --- |
+| SCLK | GPIO5 |
+| MOSI / SDI | GPIO18 |
+| MISO / SDO | GPIO13 |
+| CS / SS | GPIO12 |
+| VCC | 3.3 V |
+| GND | GND |
+
+Use the actual labels on your CC1101 board rather than relying only on the physical pin position shown in photographs.
+
+The complete ESPHome configuration, including the CC1101 data/GDO connection used by the decoder, is in [`Fineoffset-WHx080.yaml`](Fineoffset-WHx080.yaml).
+
+## RF configuration
+
+The tested CC1101 configuration is approximately:
+
+```text
+Frequency:        433.92 MHz
+Modulation:       ASK/OOK
+Symbol rate:      ~2000 baud
+Filter bandwidth: ~203 kHz
+```
+
+Observed at runtime:
+
+```text
+Frequency: 433919840 Hz
+Channel: 0
+Modulation: ASK/OOK
+Symbol Rate: 2002 baud
+Filter Bandwidth: 203125 Hz
+```
+
+## The 87-bit / 7-bit preamble problem
+
+Initially, reception looked unreliable. Occasionally a perfectly valid packet appeared:
 
 ```text
 RAW: FF A5 02 FE 21 0A 0C 01 37 0E EA
 OK weather id=80 Temp: 36.6, Hum: 33, Spd: 12.2, Gust: 14.7, Rain: 93.3, Dir: 315
 ```
 
-But many other transmissions looked like this:
+But many transmissions looked like:
 
 ```text
 FF D2 81 7F 90 ...
 FF E9 40 BF C8 ...
 ```
 
-The RF reception itself was not the main problem.
+These were not simply weak or random RF packets. They were a strong indication that the data was being decoded with the wrong **bit alignment**.
 
-The important detail was **bit alignment**.
+Fine Offset transmissions can use a **7-bit preamble**, producing an 87-bit weather frame rather than an 88-bit frame. A decoder that assumes an 8-bit `0xFF` preamble and immediately starts collecting bytes can therefore end up one bit out of alignment.
 
-## The 87-bit / 7-bit Preamble Problem
+The solution implemented here is to collect the complete RF transmission first, determine the framing from its length, and normalize the bitstream before decoding and CRC validation.
 
-The Fine Offset protocol can use a weather frame with a **7-bit preamble**, resulting in an 87-bit transmission instead of the more obvious 88-bit representation.
-
-A decoder that simply searches for an 8-bit `0xFF` preamble and then reads the following bytes can therefore start decoding one bit out of alignment.
-
-This produces data that looks surprisingly close to a valid packet but fails CRC validation.
-
-For example, packets beginning with:
-
-```text
-FF D2 81 ...
-```
-
-were observed repeatedly while the correctly aligned packets began with:
-
-```text
-FF A5 02 ...
-```
-
-After changing the decoder to collect the complete RF transmission first and then normalize the bitstream according to its length, the receiver began decoding the 87-bit variant correctly.
-
-Example:
+After doing that, the previously problematic transmissions decode normally:
 
 ```text
 RAW bits=87 pre=7 len=11: FF A5 02 FD 23 09 0B 01 37 0C FA
 OK weather bits=87 pre=7 id=80 Temp=36.5 Hum=35 Spd=11.0 Gust=13.5 Rain=93.3 Dir=270
 ```
 
-The following copy of the transmission was also decoded successfully:
+A second closely spaced transmission can also be decoded:
 
 ```text
 RAW bits=87 pre=7 len=11: FF A5 02 FC 23 0A 0D 01 37 00 23
 OK weather bits=87 pre=7 id=80 Temp=36.4 Hum=35 Spd=12.2 Gust=15.9 Rain=93.3 Dir=0
 ```
 
-CRC errors dropped to zero during testing:
+During testing the result changed from occasional valid packets and frequent CRC failures to repeated valid packets with:
 
 ```text
 rows=9 len_bad=1 crc_bad=0 hdr_bad=0 ok_w=8 ok_t=0 ok_uv=0
 ```
 
-## Protocol
+## Weather data
 
-The implementation follows the Fine Offset WH1080/WH3080 protocol behavior documented by the `rtl_433` project.
+A decoded weather frame provides:
 
-Weather frames contain information including:
-
-```text
-Station ID
-Temperature
-Humidity
-Wind speed
-Wind gust
-Rainfall
-Wind direction
-CRC
-```
-
-The decoder supports both normal and short-preamble framing.
-
-Observed working frames in this setup are primarily:
-
-```text
-87 bits
-7-bit preamble
-11 decoded bytes
-```
-
-The normalized weather frame begins with:
-
-```text
-FF A...
-```
+- Station ID
+- Temperature
+- Relative humidity
+- Wind speed
+- Wind gust
+- Cumulative rainfall
+- Wind direction
+- CRC
 
 For example:
 
 ```text
-FF A5 02 F5 23 0B 0F 01 37 0E DE
+RAW bits=87 pre=7 len=11: FF A5 02 F3 24 07 0A 01 37 0E EA
+OK weather bits=87 pre=7 id=80 Temp=35.5 Hum=36 Spd=8.6 Gust=12.2 Rain=93.3 Dir=315
 ```
+
+The normalized weather data begins with the expected Fine Offset `FF A...` pattern.
 
 ## CRC
 
-Weather frames are validated using the Fine Offset CRC-8:
+Weather frames are validated using CRC-8 with:
 
 ```text
-Polynomial: 0x31
+Polynomial:    0x31
 Initial value: 0xFF
 ```
 
-A complete valid frame produces a zero CRC remainder.
+Only packets that pass the protocol and CRC checks are published as weather data.
 
-CRC validation is important because 433 MHz receivers will inevitably receive noise and transmissions from unrelated devices.
+This is particularly useful at 433 MHz, where the receiver may also see noise and unrelated transmitters.
 
-Only packets passing the protocol checks and CRC validation are published.
+## Transmission behavior
 
-## Fine Offset Transmission Behavior
+The weather sensor does not transmit continuously. In testing, weather activity followed the expected Fine Offset cadence of approximately **48 seconds**.
 
-The outdoor sensor does not continuously transmit.
-
-Weather packets are normally transmitted periodically, approximately every 48 seconds for this protocol family.
-
-Multiple closely spaced transmissions may also be observed.
-
-During testing, gaps of approximately 31 ms were visible between related RF activity:
+Closely spaced RF activity around 31 ms was also observed:
 
 ```text
 break=30962us
@@ -162,191 +174,94 @@ break=30974us
 break=32952us
 ```
 
-This behavior is consistent with the Fine Offset protocol handled by `rtl_433`.
+The decoder handles each valid transmission independently.
 
-## Hardware
+## ESPHome sensors
 
-The tested setup uses:
+The example configuration exposes sensors for:
 
-* ESP32
-* CC1101 433 MHz module
-* External 433 MHz antenna / pigtail
-* ESPHome
+- Temperature
+- Humidity
+- Wind Speed
+- Wind Max Speed / Gust
+- Wind Direction
+- Rain Total
+- UV
+- Outdoor Illuminance
+- Last Station ID
 
-The CC1101 is configured for approximately:
-
-```text
-Frequency:       433.92 MHz
-Modulation:      ASK/OOK
-Symbol rate:     ~2000 baud
-Filter bandwidth: ~203 kHz
-```
-
-Example runtime configuration:
+ESPHome may only print a sensor state publication when that value changes. Therefore this:
 
 ```text
-CC1101:
-  Frequency: 433919840 Hz
-  Channel: 0
-  Modulation: ASK/OOK
-  Symbol Rate: 2002 baud
-  Filter Bandwidth: 203125 Hz
-```
-
-## Example ESP32 SPI Wiring
-
-The wiring used during development was:
-
-| CC1101     | ESP32  |
-| ---------- | ------ |
-| SCLK       | GPIO5  |
-| MOSI / SDI | GPIO18 |
-| MISO / SDO | GPIO13 |
-| CS / SS    | GPIO12 |
-| VCC        | 3.3 V  |
-| GND        | GND    |
-
-**Important:** CC1101 module pinouts are not always identical.
-
-Check the labels and pinout of your specific CC1101 board before connecting it. Some visually similar modules use a different physical pin arrangement.
-
-Do not power a CC1101 module from 5 V unless your specific board explicitly supports it.
-
-## ESPHome Sensors
-
-The example configuration exposes:
-
-* Temperature
-* Humidity
-* Wind Speed
-* Wind Max Speed / Gust
-* Wind Direction
-* Rain Total
-* UV
-* Outdoor Illuminance
-* Last Station ID
-
-Example Home Assistant entities may therefore look like:
-
-```text
-Temperature
-Humidity
-Wind Speed
-Wind max speed
-Wind Direction
-Rain Total
-UV Exterior
-Outdoor Illuminance
-Last station id
-```
-
-## Example Successful Reception
-
-A complete successful reception looks like:
-
-```text
-RAW bits=87 pre=7 len=11: FF A5 02 F3 24 07 0A 01 37 0E EA
-
-OK weather bits=87 pre=7
-id=80
-Temp=35.5
-Hum=36
-Spd=8.6
-Gust=12.2
-Rain=93.3
-Dir=315
-```
-
-ESPHome then publishes changed sensor values:
-
-```text
-'Last station id' >> 80
-'Temperature' >> 35.5 °C
-'Humidity' >> 36 %
-'Wind Speed' >> 8.6 km/h
-'Wind max speed' >> 12.2 km/h
-```
-
-Note that ESPHome may only log sensor publications when their values change.
-
-Therefore, seeing only:
-
-```text
+OK weather bits=87 pre=7 id=80 Temp=36.4 Hum=35 Spd=12.2 Gust=15.9 Rain=93.3 Dir=0
 'Last station id' >> 80
 ```
 
-after an `OK weather` message does **not** mean that the RF packet contained only the station ID.
-
-The complete weather data was decoded; the other sensor values simply had not changed.
+does **not** mean that the RF packet contained only the station ID. The complete weather frame was decoded; the other values simply had not changed since the previous publication.
 
 ## Diagnostics
 
-The component includes diagnostic counters useful while tuning or troubleshooting reception.
-
-Example:
+The decoder provides diagnostic counters to make RF and framing problems visible:
 
 ```text
 diag edges=1569 valid=784 rows=9 len_bad=1 crc_bad=0 hdr_bad=0 ok_w=8 ok_t=0 ok_uv=0 resets=10 max_bits=87
 ```
 
-Useful counters include:
+Important counters include:
 
-* `rows` — completed RF bit rows
-* `len_bad` — rows with unsupported lengths
-* `crc_bad` — packets rejected by CRC
-* `hdr_bad` — invalid protocol headers
-* `ok_w` — valid weather packets
-* `ok_t` — valid time packets
-* `ok_uv` — valid UV/light packets
-* `max_bits` — maximum useful frame length observed
+| Counter | Meaning |
+| --- | --- |
+| `rows` | Completed RF bit rows |
+| `len_bad` | Rows with unsupported lengths |
+| `crc_bad` | Packets rejected by CRC |
+| `hdr_bad` | Invalid protocol headers |
+| `ok_w` | Valid weather packets |
+| `ok_t` | Valid time packets |
+| `ok_uv` | Valid UV/light packets |
+| `max_bits` | Maximum useful frame length observed |
 
-For a correctly working WH1080/WH3080 receiver, repeated `ok_w` increments with `crc_bad=0` are a very good sign.
+Repeated increments of `ok_w` with `crc_bad=0` are a good indication that reception and framing are working correctly.
 
-## Files
+## Installation
 
-Typical repository structure:
+The repository contains:
 
 ```text
 .
 ├── README.md
-├── LICENSE
+├── Fineoffset-WHx080.yaml
 ├── wh1080.h
-└── fineoffset-wh1080.yaml
+├── CC1101 front.jpg
+├── CC1101 back.jpg
+└── working set.jpg
 ```
 
-`wh1080.h` contains the Fine Offset decoder.
+1. Copy [`wh1080.h`](wh1080.h) into the directory containing your ESPHome YAML file.
+2. Use [`Fineoffset-WHx080.yaml`](Fineoffset-WHx080.yaml) as a reference for the ESPHome and CC1101 configuration.
+3. Adjust Wi-Fi, API/OTA settings and GPIO assignments for your own ESP32 and CC1101 wiring.
+4. Compile and flash with ESPHome.
+5. Enable DEBUG logging while testing reception.
 
-`fineoffset-wh1080.yaml` contains an example ESPHome configuration for the ESP32 + CC1101 setup.
+## Compatibility
+
+This project has been tested with real Fine Offset-compatible transmissions using the hardware shown above.
+
+The implementation is intended for the WH1080 / WH3080 protocol family. Other Fine Offset models may use different framing or message layouts even if they also operate around 433 MHz.
+
+If you test another compatible station, reports and DEBUG logs are welcome.
 
 ## Credits
 
-The Fine Offset protocol decoding and framing behavior used by this project is based on the excellent reverse-engineering work in the **rtl_433** project, particularly its Fine Offset WH1080/WH3080 decoder.
+The protocol decoding and framing behavior in this project is based on the excellent reverse-engineering work of the [`rtl_433`](https://github.com/merbanan/rtl_433) project, particularly:
 
-rtl_433:
+[`src/devices/fineoffset_wh1080.c`](https://github.com/merbanan/rtl_433/blob/master/src/devices/fineoffset_wh1080.c)
 
-https://github.com/merbanan/rtl_433
+This project adapts the relevant Fine Offset protocol handling for direct use with an ESP32, CC1101 and ESPHome.
 
-Fine Offset WH1080 decoder:
-
-https://github.com/merbanan/rtl_433/blob/master/src/devices/fineoffset_wh1080.c
-
-This project adapts the relevant protocol concepts for direct use with an ESP32, CC1101 and ESPHome.
-
-Please refer to the upstream `rtl_433` project for its licensing terms and original implementation.
+Please refer to the upstream `rtl_433` project for its original implementation and licensing terms.
 
 ## Status
 
-Experimental, but tested successfully with real Fine Offset transmissions.
+**Working / experimental.**
 
-During initial testing, the original decoder accepted only occasional packets because most transmissions were decoded one bit out of alignment.
-
-With 87-bit / 7-bit preamble handling enabled, repeated weather transmissions were decoded successfully with valid CRC:
-
-```text
-crc_bad=0
-ok_w=8
-```
-
-Contributions and reports from other Fine Offset WH1080/WH3080 owners are welcome.
-
-If you have a compatible station using a different frame length or message type, please open an issue and include DEBUG-level RF logs.
+The receiver is successfully decoding repeated real-world 87-bit / 7-bit-preamble weather transmissions with valid CRC. More testing with other Fine Offset station variants is welcome.
