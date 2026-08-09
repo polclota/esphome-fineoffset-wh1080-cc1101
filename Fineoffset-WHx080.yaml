@@ -1,0 +1,156 @@
+substitutions:
+  devicename: "fineoffset-whx080-esp32"
+  friendly_name: "Fineoffset-WHx080-ESP32"
+
+  # v2 (Per si canvies de mòdul/cablejat en el futur)
+  # gpio_spi_clk: "18"
+  # gpio_spi_mosi: "23"
+  # gpio_spi_miso: "19"
+  # gpio_cc1101_cs: "5"
+  # gpio_gdo0: "13"
+
+  # v1 (Pins actius)
+  pin_spi_clk: "5"
+  pin_spi_mosi: "13"
+  pin_spi_miso: "18"
+  pin_cc1101_cs: "12"
+  pin_gdo0: "19"
+
+esphome:
+  name: ${devicename}
+  friendly_name: ${friendly_name}
+  libraries:
+    - EEPROM
+  includes:
+    - wh1080.h
+
+  on_boot:
+    priority: -10
+    then:
+      - delay: 2s
+      - cc1101.begin_rx: cc
+      - lambda: |-
+          auto *decoder = esphome::wh1080::create_instance(${pin_gdo0});  
+          decoder->temp_sensor = id(wh1080_temp);
+          decoder->hum_sensor = id(wh1080_hum);
+          decoder->wind_speed_sensor = id(wh1080_wind);
+          decoder->wind_gust_sensor = id(wh1080_gust);
+          decoder->wind_dir_sensor = id(wh1080_dir);
+          decoder->rain_sensor = id(wh1080_rain);
+          decoder->station_id_sensor = id(wh1080_station_id);
+          decoder->uv_sensor = id(wh1080_uv);
+          decoder->lux_sensor = id(wh1080_lux);
+          decoder->setup();
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    advanced:
+      minimum_chip_revision: "3.0"
+      sram1_as_iram: true
+
+packages:
+  common: !include "../!common/common.yaml"
+
+api:
+  max_connections: 12
+
+logger:
+  level: DEBUG
+  logs:
+    internal_temperature.esp32: WARN
+    cc1101: DEBUG
+    wh1080: DEBUG
+    
+spi:
+  clk_pin: ${pin_spi_clk}
+  mosi_pin: ${pin_spi_mosi}
+  miso_pin: ${pin_spi_miso}
+
+cc1101:
+  id: cc
+  cs_pin: ${pin_cc1101_cs}
+  frequency: 433.92MHz
+  modulation_type: ASK/OOK
+  sync_mode: None
+  symbol_rate: 2000
+  packet_mode: false
+  rx_attenuation: 0dB
+  magn_target: 42dB
+  max_lna_gain: Default
+  max_dvga_gain: Default
+  filter_length_ask_ook: 4dB
+  filter_bandwidth: 203kHz
+
+sensor:
+  - platform: template
+    id: wh1080_temp
+    name: "Temperature"
+    icon: "mdi:thermometer"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+  - platform: template
+    id: wh1080_hum
+    name: "Humidity"
+    icon: "mdi:water-percent"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: humidity
+  - platform: template
+    id: wh1080_wind
+    name: "Wind Speed"
+    icon: "mdi:weather-windy"
+    unit_of_measurement: "km/h"
+    accuracy_decimals: 1
+  - platform: template
+    id: wh1080_gust
+    name: "Wind max speed"
+    icon: "mdi:weather-windy-variant"
+    unit_of_measurement: "km/h"
+    accuracy_decimals: 1
+  - platform: template
+    id: wh1080_dir
+    name: "Wind Direction"
+    icon: "mdi:compass-rose"
+    unit_of_measurement: "°"
+    accuracy_decimals: 0
+  - platform: template
+    id: wh1080_rain
+    name: "Rain Total"
+    icon: "mdi:weather-rainy"
+    unit_of_measurement: "mm"
+    accuracy_decimals: 1
+  - platform: template
+    id: wh1080_uv
+    name: "UV Exterior"
+    icon: "mdi:white-balance-sunny"
+    accuracy_decimals: 1
+  - platform: template
+    id: wh1080_lux
+    name: "Lluminositat Exterior"
+    icon: "mdi:brightness-6"
+    unit_of_measurement: "lx"
+    accuracy_decimals: 1
+  - platform: template
+    id: wh1080_station_id
+    name: "Last station id"
+    icon: "mdi:identifier"
+    accuracy_decimals: 0
+  - platform: internal_temperature
+    name: "Internal Temperature ESP32"
+    update_interval: 120s
+
+interval:
+  - interval: 1h
+    then:
+      - cc1101.begin_rx: cc
+
+  - interval: 100ms
+    then:
+      - lambda: |-
+          auto *decoder = esphome::wh1080::get_instance();
+          if (decoder != nullptr) {
+            decoder->loop();
+          }
